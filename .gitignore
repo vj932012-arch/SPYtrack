@@ -1,4 +1,0 @@
-.streamlit/secrets.toml
-.tokens/
-*.pickle
-__pycache__/
