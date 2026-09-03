@@ -1,4 +1,4 @@
 streamlit
-robin_stocks
+yfinance
 pandas
 requests
