@@ -1,0 +1,4 @@
+streamlit
+robin_stocks
+pandas
+requests
