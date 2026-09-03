@@ -15,11 +15,15 @@ st.markdown("""<style>
 # 2. Spread Engine & Real-Time Data (yfinance)
 def fetch_spreads(strategy, width_target, max_debit_ratio, min_ror, min_vol, min_oi, expiry):
     spy = yf.Ticker("SPY")
-    price = spy.fast_info['last_price']
-    change = spy.fast_info['day_change_percent']
+    price = float(spy.fast_info.get('last_price', 0.0))
+    prev_close = float(spy.fast_info.get('previous_close', price))
+    change = (price - prev_close) / prev_close if prev_close else 0.0
     
     chain = spy.option_chain(expiry)
     df_opt = chain.calls if "Call" in strategy else chain.puts
+    
+    if df_opt.empty:
+        return pd.DataFrame(), price, change
     
     # Filtering and Fallback Logic
     df_opt['ask_calc'] = df_opt['ask'].where(df_opt['ask'] > 0, df_opt['lastPrice'])
@@ -58,14 +62,21 @@ st.title("SPY Live Dashboard (yfinance)")
 spy_ticker = yf.Ticker("SPY")
 all_expiries = spy_ticker.options
 
+if not all_expiries:
+    st.error("No expiration dates found for SPY. Yahoo Finance may be rate-limiting or the market is closed.")
+    st.stop()
+
 st.sidebar.header("Filter Settings")
 selected_exp = st.sidebar.selectbox("Expiration Date", all_expiries)
 strat = st.sidebar.radio("Strategy", ["Call Debit Spread", "Put Debit Spread"])
 width = st.sidebar.selectbox("Strike Width", [1, 2, 5, 10])
 vol_min = st.sidebar.number_input("Min Volume", value=100)
 oi_min = st.sidebar.number_input("Min Open Interest", value=100)
+
 max_d_ratio = st.sidebar.slider("Max Debit to Width Ratio", 0.10, 0.60, 0.30)
+
 min_ror_val = st.sidebar.slider("Min RoR", 0.5, 3.0, 1.5)
+
 auto_refresh = st.sidebar.toggle("Auto-Refresh (60s)", value=True)
 
 df_spreads, current_price, day_pct = fetch_spreads(strat, width, max_d_ratio, min_ror_val, vol_min, oi_min, selected_exp)
