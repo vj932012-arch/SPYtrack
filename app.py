@@ -1,96 +1,86 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import requests
-import time
 from datetime import datetime
+import pytz
+import time
 
-# 1. UI Configuration & Mobile CSS
-st.set_page_config(page_title="SPY YFinance Tracker", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""<style>
-.metric-card { background: #f0f2f6; padding: 10px; border-radius: 8px; }
-@media (max-width: 640px) { .stMetric { font-size: 0.8rem; } }
-</style>""", unsafe_allow_html=True)
+# 1. UI Configuration & 0 DTE Branding
+st.set_page_config(page_title="SPY 0 DTE Tracker", layout="wide")
+st.markdown("""<style>.dte-badge { background: #ff4b4b; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; }</style>""", unsafe_allow_html=True)
 
-# 2. Spread Engine & Real-Time Data (yfinance)
-def fetch_spreads(strategy, width_target, max_debit_ratio, min_ror, min_vol, min_oi, expiry):
+# 2. 0 DTE Signal Engine (5m interval, Momentum & Time-of-Day)
+def get_0dte_signal():
+    tz = pytz.timezone("US/Eastern")
+    now = datetime.now(tz)
+    current_time = now.strftime("%H:%M")
+    
     spy = yf.Ticker("SPY")
+    hist = spy.history(period="1d", interval="5m")
+    if len(hist) < 21: return "WAIT", "Gathering 5m data..."
+    
+    ema9 = hist['Close'].ewm(span=9, adjust=False).mean().iloc[-1]
+    ema21 = hist['Close'].ewm(span=21, adjust=False).mean().iloc[-1]
+    delta = hist['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rsi = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9)).iloc[-1]))
+    price = hist['Close'].iloc[-1]
+    
+    # Time-of-Day Logic
+    if current_time > "15:15": return "WAIT", "Post-3:15 PM high-risk cutoff."
+    if "11:30" <= current_time <= "13:30": return "WAIT", "Midday chop/Theta warning."
+    
+    if price > ema9 > ema21 and rsi < 70: return "CALL DEBIT SUGGESTED", "Bullish momentum (9/21 EMA)."
+    if price < ema9 < ema21 and rsi > 30: return "PUT DEBIT SUGGESTED", "Bearish momentum (9/21 EMA)."
+    return "WAIT", "No 0 DTE trend confirmed."
+
+# 3. 0 DTE Spread Engine
+def fetch_0dte_spreads(strat, width, max_debit_ratio, min_ror):
+    spy = yf.Ticker("SPY")
+
+    if not spy.options: return None
+    expiry = spy.options[0] # Lock to 0 DTE
+
+
     price = float(spy.fast_info.get('last_price', 0.0))
-    prev_close = float(spy.fast_info.get('previous_close', price))
-    change = (price - prev_close) / prev_close if prev_close else 0.0
-    
     chain = spy.option_chain(expiry)
-    df_opt = chain.calls if "Call" in strategy else chain.puts
+    df = chain.calls if "Call" in strat else chain.puts
     
-    if df_opt.empty:
-        return pd.DataFrame(), price, change
+    # Target ATM/1-tick ITM
+    df['dist'] = (df['strike'] - price).abs()
+    long_leg = df.sort_values('dist').iloc[0]
+    target_short = long_leg['strike'] + width if "Call" in strat else long_leg['strike'] - width
+    short_matches = df[df['strike'] == target_short]
     
-    # Filtering and Fallback Logic
-    df_opt['ask_calc'] = df_opt['ask'].where(df_opt['ask'] > 0, df_opt['lastPrice'])
-    df_opt['bid_calc'] = df_opt['bid'].where(df_opt['bid'] > 0, df_opt['lastPrice'])
-    
-    df_filt = df_opt[(df_opt['volume'] >= min_vol) & (df_opt['openInterest'] >= min_oi)].sort_values("strike")
-    results = []
-    opt_type = "call" if "Call" in strategy else "put"
-    
-    for _, long_leg in df_filt.iterrows():
-        target_strike = long_leg["strike"] + width_target if opt_type == "call" else long_leg["strike"] - width_target
-        short_matches = df_filt[df_filt["strike"] == target_strike]
-        
-        if not short_matches.empty:
-            short_leg = short_matches.iloc[0]
-            net_debit = long_leg["ask_calc"] - short_leg["bid_calc"]
-            
-            if 0 < net_debit <= (width_target * max_debit_ratio):
-                max_profit = width_target - net_debit
-                ror = max_profit / net_debit
-                
-                if ror >= min_ror:
-                    be = long_leg["strike"] + net_debit if opt_type == "call" else long_leg["strike"] - net_debit
-                    results.append({
-                        "Spread": f"{long_leg['strike']}/{short_leg['strike']} {opt_type.upper()}",
-                        "Net Debit": f"${net_debit:.2f}",
-                        "Max Profit": f"${max_profit:.2f}",
-                        "RoR": f"{ror:.1%}",
-                        "Breakeven": f"${be:.2f}",
-                        "Vol (L/S)": f"{long_leg['volume']}/{short_leg['volume']}"
-                    })
-    return pd.DataFrame(results), price, change
+    if not short_matches.empty:
+        short_leg = short_matches.iloc[0]
+        debit = long_leg['ask'] - short_leg['bid']
+        if 0 < debit <= (width * max_debit_ratio):
+            profit = width - debit
+            ror = profit / debit
+            if ror >= min_ror:
+                return {"Spread": f"{long_leg['strike']}/{short_leg['strike']}", "Entry": f"${debit:.2f}", "Max Profit": f"${profit:.2f}", "RoR": f"{ror:.1%}", "BE": f"${long_leg['strike']+debit if 'Call' in strat else long_leg['strike']-debit:.2f}"}
+    return None
 
-# 3. Main Interface
-st.title("SPY Live Dashboard (yfinance)")
-spy_ticker = yf.Ticker("SPY")
-all_expiries = spy_ticker.options
+st.title("SPY 0 DTE Momentum Dashboard")
+st.markdown('Current Mode: <span class="dte-badge">0 DTE ACTIVE</span>', unsafe_allow_html=True)
 
-if not all_expiries:
-    st.error("No expiration dates found for SPY. Yahoo Finance may be rate-limiting or the market is closed.")
-    st.stop()
-
-st.sidebar.header("Filter Settings")
-selected_exp = st.sidebar.selectbox("Expiration Date", all_expiries)
+# Sidebar 0 DTE Defaults
 strat = st.sidebar.radio("Strategy", ["Call Debit Spread", "Put Debit Spread"])
-width = st.sidebar.selectbox("Strike Width", [1, 2, 5, 10])
-vol_min = st.sidebar.number_input("Min Volume", value=100)
-oi_min = st.sidebar.number_input("Min Open Interest", value=100)
+width = st.sidebar.selectbox("Strike Width", [1.0, 2.0, 3.0], index=0)
+max_dr = st.sidebar.slider("Max Debit Ratio", 0.10, 0.60, 0.38)
+min_ror = st.sidebar.slider("Min RoR", 1.0, 3.0, 1.6)
 
-max_d_ratio = st.sidebar.slider("Max Debit to Width Ratio", 0.10, 0.60, 0.30)
+sig, reason = get_0dte_signal()
+st.info(f"**Signal**: {sig} | {reason}")
 
-min_ror_val = st.sidebar.slider("Min RoR", 0.5, 3.0, 1.5)
-
-auto_refresh = st.sidebar.toggle("Auto-Refresh (60s)", value=True)
-
-df_spreads, current_price, day_pct = fetch_spreads(strat, width, max_d_ratio, min_ror_val, vol_min, oi_min, selected_exp)
-
-c1, c2, c3 = st.columns(3)
-c1.metric("SPY Price", f"${current_price:.2f}", f"{day_pct:.2%}")
-c2.metric("Spreads Found", len(df_spreads))
-c3.metric("Status", "Live")
-
-st.dataframe(df_spreads, use_container_width=True)
-
-if st.button("Dispatch Alerts (Discord/Telegram)"):
-    st.success("High RoR opportunities dispatched via Webhooks.")
-
-if auto_refresh:
-    time.sleep(60)
-    st.rerun()
+rec = fetch_0dte_spreads(strat, width, max_dr, min_ror)
+if rec:
+    st.subheader("🎯 Top 0 DTE Recommendation")
+    cols = st.columns(5)
+    cols[0].metric("Spread", rec['Spread'])
+    cols[1].metric("Entry (Max Risk)", rec['Entry'])
+    cols[2].metric("Max Profit", rec['Max Profit'])
+    cols[3].metric("RoR", rec['RoR'])
+    cols[4].metric("Breakeven", rec['BE'])
