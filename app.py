@@ -1,225 +1,467 @@
-# SPY 0 DTE Options Tracker with Interactive Plotly Graph
-
+import datetime
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import pytz
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-from datetime import datetime
-import pytz
-import plotly.graph_objects as go
-import time
 
-# 1. UI Configuration & Mobile CSS
-st.set_page_config(page_title="SPY 0 DTE Tracker", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""<style>
-.dte-badge { background: #ff4b4b; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
-.metric-card { background: #f0f2f6; padding: 10px; border-radius: 8px; }
-@media (max-width: 640px) { .stMetric { font-size: 0.8rem; } }
-</style>""", unsafe_allow_html=True)
+# ---------------------------------------------------------
+# Page Configuration & Styling
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="SPY Intraday Spread Tracker", page_icon="📈", layout="wide"
+)
 
-# 2. 0 DTE Signal Engine (5m interval, Momentum & Time-of-Day)
-def get_0dte_signal():
-    tz = pytz.timezone("US/Eastern")
-    now = datetime.now(tz)
-    current_time = now.strftime("%H:%M")
-    
-    spy = yf.Ticker("SPY")
-    hist = spy.history(period="1d", interval="5m")
-    if len(hist) < 21:
-        return "WAIT", "Gathering 5m historical data...", None, None, None, None
-    
-    ema9 = hist['Close'].ewm(span=9, adjust=False).mean()
-    ema21 = hist['Close'].ewm(span=21, adjust=False).mean()
-    delta = hist['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss.replace(0, 1e-9)
-    rsi = (100 - (100 / (1 + rs))).iloc[-1]
-    
-    current_price = hist['Close'].iloc[-1]
-    curr_ema9 = ema9.iloc[-1]
-    curr_ema21 = ema21.iloc[-1]
-    
-    # Time-of-Day Rules
-    if current_time > "15:15":
-        return "WAIT", f"Post-3:15 PM ET expiration cutoff (High risk)", hist, ema9, ema21, current_price
-    if "11:30" <= current_time <= "13:30":
-        return "WAIT", f"Midday chop window (Theta acceleration)", hist, ema9, ema21, current_price
-    
-    # Directional Signals
-    if current_price > curr_ema9 > curr_ema21 and rsi < 70:
-        return "CALL DEBIT SUGGESTED", f"Bullish momentum: SPY (${current_price:.2f}) > 9 EMA (${curr_ema9:.2f}) > 21 EMA (${curr_ema21:.2f}) | RSI: {rsi:.1f}", hist, ema9, ema21, current_price
-    elif current_price < curr_ema9 < curr_ema21 and rsi > 30:
-        return "PUT DEBIT SUGGESTED", f"Bearish breakdown: SPY (${current_price:.2f}) < 9 EMA (${curr_ema9:.2f}) < 21 EMA (${curr_ema21:.2f}) | RSI: {rsi:.1f}", hist, ema9, ema21, current_price
-    
-    return "WAIT", f"Consolidation / No confirmed momentum | RSI: {rsi:.1f}", hist, ema9, ema21, current_price
+st.markdown(
+    """
+    <style>
+    .metric-card {
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 15px;
+        background-color: rgba(255, 255, 255, 0.03);
+        margin-bottom: 10px;
+    }
+    .signal-bull {
+        color: #00e676;
+        font-weight: 700;
+        font-size: 1.25rem;
+    }
+    .signal-bear {
+        color: #ff5252;
+        font-weight: 700;
+        font-size: 1.25rem;
+    }
+    .signal-neutral {
+        color: #b0bec5;
+        font-weight: 600;
+        font-size: 1.25rem;
+    }
+    </style>
+""",
+    unsafe_allow_html=True,
+)
 
-# 3. 0 DTE Spread Engine
-def fetch_0dte_spreads(strat, width, max_debit_ratio, min_ror):
-    spy = yf.Ticker("SPY")
-    if not spy.options:
-        return None
-    expiry = spy.options[0] # Lock strictly to 0 DTE
 
-    price = float(spy.fast_info.get('last_price', 0.0))
-    chain = spy.option_chain(expiry)
-    df = chain.calls if "Call" in strat else chain.puts
-    
+# ---------------------------------------------------------
+# Signal Generation Engine
+# ---------------------------------------------------------
+def generate_intraday_signals(
+    df: pd.DataFrame,
+    fast_ema: int = 9,
+    slow_ema: int = 21,
+    atr_period: int = 14,
+    rvol_window: int = 20,
+) -> pd.DataFrame:
+    """Computes dynamic multi-factor entry thresholds for intraday directional debit spreads.
+
+    Expected columns in df: ['open', 'high', 'low', 'close', 'volume', 'vwap']
+    Index must be a DatetimeIndex in US/Eastern.
+    """
+    df = df.copy()
+
+    # 1. EMAs and Normalized Delta
+    df["ema_fast"] = df["close"].ewm(span=fast_ema, adjust=False).mean()
+    df["ema_slow"] = df["close"].ewm(span=slow_ema, adjust=False).mean()
+
+    # 2. ATR Calculation
+    tr1 = df["high"] - df["low"]
+    tr2 = (df["high"] - df["close"].shift(1)).abs()
+    tr3 = (df["low"] - df["close"].shift(1)).abs()
+    df["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["atr"] = df["tr"].rolling(window=atr_period).mean()
+
+    # Normalize EMA separation by ATR
+    df["ema_spread_norm"] = (df["ema_fast"] - df["ema_slow"]) / df["atr"]
+
+    # 3. Normalized Distance from VWAP
+    df["vwap_dist_norm"] = (df["close"] - df["vwap"]) / df["atr"]
+
+    # 4. Volume Validation (RVOL)
+    df["vol_ma"] = df["volume"].rolling(window=rvol_window).mean()
+    df["rvol"] = df["volume"] / df["vol_ma"]
+
+    # 5. Session Phase Filtering
+    time = df.index.time
+    t_start_am = pd.to_datetime("09:50:00").time()
+    t_end_am = pd.to_datetime("11:30:00").time()
+    t_start_pm = pd.to_datetime("13:45:00").time()
+    t_end_pm = pd.to_datetime("15:15:00").time()
+
+    session_active = ((time >= t_start_am) & (time <= t_end_am)) | (
+        (time >= t_start_pm) & (time <= t_end_pm)
+    )
+
+    # Signal Threshold Logic
+    call_spread_trigger = (
+        session_active
+        & (df["ema_spread_norm"] > 0.15)  # Fast EMA established above slow EMA
+        & (df["vwap_dist_norm"] >= 0.20)  # Price cleared VWAP support
+        & (df["vwap_dist_norm"] <= 1.10)  # Not overextended into upper bands
+        & (df["rvol"] >= 1.30)  # Volume expansion confirming breakout
+        & (df["close"] > df["open"])  # Bullish candle close
+    )
+
+    put_spread_trigger = (
+        session_active
+        & (df["ema_spread_norm"] < -0.15)  # Fast EMA established below slow EMA
+        & (df["vwap_dist_norm"] <= -0.20)  # Price broken below VWAP
+        & (df["vwap_dist_norm"] >= -1.10)  # Not overextended into lower bands
+        & (df["rvol"] >= 1.30)  # Volume surge on distribution
+        & (df["close"] < df["open"])  # Bearish candle close
+    )
+
+    df["signal"] = 0
+    df.loc[call_spread_trigger, "signal"] = 1  # Long Call Debit Spread
+    df.loc[put_spread_trigger, "signal"] = -1  # Long Put Debit Spread
+
+    # Filter out consecutive duplicate signals (take initial impulse only)
+    df["entry_signal"] = np.where(
+        (df["signal"] != 0) & (df["signal"] != df["signal"].shift(1)),
+        df["signal"],
+        0,
+    )
+
+    return df
+
+
+# ---------------------------------------------------------
+# Market Data Fetcher & VWAP Assembler
+# ---------------------------------------------------------
+@st.cache_data(ttl=60)
+def fetch_spy_intraday_data():
+    """Fetches intraday 5-minute bars for SPY and computes cumulative day-anchored VWAP."""
+    ticker = yf.Ticker("SPY")
+    df = ticker.history(period="5d", interval="5m")
+
     if df.empty:
-        return None
-    
-    # Target ATM / 1-tick ITM long strike
-    df['dist'] = (df['strike'] - price).abs()
-    long_leg = df.sort_values('dist').iloc[0]
-    
-    target_short = long_leg['strike'] + width if "Call" in strat else long_leg['strike'] - width
-    short_matches = df[df['strike'] == target_short]
-    
-    if not short_matches.empty:
-        short_leg = short_matches.iloc[0]
-        ask_calc = float(long_leg['ask'] if long_leg['ask'] > 0 else long_leg['lastPrice'])
-        bid_calc = float(short_leg['bid'] if short_leg['bid'] > 0 else short_leg['lastPrice'])
-        debit = ask_calc - bid_calc
-        
-        if 0 < debit <= (width * max_debit_ratio):
-            profit = width - debit
-            ror = profit / debit
-            if ror >= min_ror:
-                be = long_leg['strike'] + debit if "Call" in strat else long_leg['strike'] - debit
-                return {
-                    "Spread": f"{long_leg['strike']:.1f}/{short_leg['strike']:.1f}",
-                    "Long_Strike": float(long_leg['strike']),
-                    "Short_Strike": float(short_leg['strike']),
-                    "Entry": debit,
-                    "Max_Profit": profit,
-                    "RoR": ror,
-                    "BE": be
-                }
+        return pd.DataFrame()
+
+    # Normalize column names
+    df.columns = [c.lower() for c in df.columns]
+
+    # Localize index to US/Eastern
+    if df.index.tz is None:
+        df.index = (
+            df.index.tz_localize("UTC")
+            .tz_convert("US/Eastern")
+        )
+    else:
+        df.index = df.index.tz_convert("US/Eastern")
+
+    # Filter for standard market hours (9:30 AM to 4:00 PM ET)
+    df = df.between_time("09:30", "16:00").copy()
+
+    # Anchor VWAP to each session date
+    df["date"] = df.index.date
+    typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
+    df["cum_vp"] = (
+        typical_price * df["volume"]
+    ).groupby(df["date"]).cumsum()
+    df["cum_vol"] = (
+        df["volume"]
+    ).groupby(df["date"]).cumsum()
+    df["vwap"] = df["cum_vp"] / df["cum_vol"]
+    df.drop(columns=["date", "cum_vp", "cum_vol"], inplace=True)
+
+    return df
+
+
+def get_spread_recommendation(
+    current_price: float, signal: int, spread_width: float = 2.0
+):
+    """Calculates strike selections for vertical debit spreads."""
+    if signal == 1:
+        long_strike = np.floor(current_price)
+        short_strike = long_strike + spread_width
+        return {
+            "type": "CALL DEBIT SPREAD (Bullish)",
+            "long_leg": f"Buy ${long_strike:.0f} Call",
+            "short_leg": f"Sell ${short_strike:.0f} Call",
+            "target": f"SPY > ${short_strike:.2f} by EOD",
+            "risk_profile": "Defined Risk (Net Debit Paid)",
+        }
+    elif signal == -1:
+        long_strike = np.ceil(current_price)
+        short_strike = long_strike - spread_width
+        return {
+            "type": "PUT DEBIT SPREAD (Bearish)",
+            "long_leg": f"Buy ${long_strike:.0f} Put",
+            "short_leg": f"Sell ${short_strike:.0f} Put",
+            "target": f"SPY < ${short_strike:.2f} by EOD",
+            "risk_profile": "Defined Risk (Net Debit Paid)",
+        }
     return None
 
-# --- Main Dashboard ---
-st.title("SPY 0 DTE Real-Time Momentum Tracker")
-st.markdown('Current Mode: <span class="dte-badge">0 DTE ACTIVE</span>', unsafe_allow_html=True)
+
+# ---------------------------------------------------------
+# Main UI App
+# ---------------------------------------------------------
+st.title("🎯 SPY Dynamic Intraday Spread Tracker")
+st.caption(
+    "Multi-factor signal scanner analyzing normalized EMA deltas, VWAP displacement, and RVOL expansion."
+)
 
 # Sidebar Parameters
-st.sidebar.header("0 DTE Filter Controls")
-strat = st.sidebar.radio("Strategy", ["Call Debit Spread", "Put Debit Spread"])
-width = st.sidebar.selectbox("Strike Width ($)", [1.0, 2.0, 3.0], index=0)
-max_dr = st.sidebar.slider("Max Debit Ratio (% of Width)", 0.10, 0.60, 0.38)
-min_ror = st.sidebar.slider("Min Return on Risk (RoR)", 1.0, 3.0, 1.6)
-auto_refresh = st.sidebar.toggle("Live Auto-Refresh (60s)", value=True)
+st.sidebar.header("⚙️ Strategy Parameters")
+fast_ema = st.sidebar.slider("Fast EMA", 5, 20, 9)
+slow_ema = st.sidebar.slider("Slow EMA", 15, 50, 21)
+atr_len = st.sidebar.slider("ATR Period", 7, 28, 14)
+rvol_win = st.sidebar.slider("RVOL Baseline Window", 10, 40, 20)
+spread_width = st.sidebar.selectbox("Spread Width ($)", [1.0, 2.0, 3.0, 5.0], index=1)
 
-# Signal Evaluation
-sig, reason, hist_df, ema9, ema21, current_price = get_0dte_signal()
-
-if "CALL" in sig:
-    st.success(f"**Signal**: {sig} — {reason}")
-elif "PUT" in sig:
-    st.warning(f"**Signal**: {sig} — {reason}")
-else:
-    st.info(f"**Signal**: {sig} — {reason}")
-
-rec = fetch_0dte_spreads(strat, width, max_dr, min_ror)
-
-if rec:
-    st.subheader("🎯 Optimal 0 DTE Spread Recommendation")
-    cols = st.columns(5)
-    cols[0].metric("Recommended Spread", rec['Spread'])
-    cols[1].metric("Entry Cost (Max Risk)", f"${rec['Entry']:.2f}")
-    cols[2].metric("Max Profit Target", f"${rec['Max_Profit']:.2f}")
-    cols[3].metric("Return on Risk (RoR)", f"{rec['RoR']:.1%}")
-    cols[4].metric("Breakeven Price", f"${rec['BE']:.2f}")
-
-# 4. Interactive Visual Price Chart with Critical Parameters
-st.subheader("📊 SPY Live Price Action & Critical Parameter Overlays")
-
-if hist_df is not None and not hist_df.empty:
-    fig = go.Figure()
-    
-    # 5-minute Price Action
-    fig.add_trace(go.Scatter(
-        x=hist_df.index, y=hist_df['Close'],
-        mode='lines', name='SPY Price (5m Close)',
-        line=dict(color='#1f77b4', width=2.5)
-    ))
-    
-    # 9 EMA (Fast Signal Line)
-    fig.add_trace(go.Scatter(
-        x=hist_df.index, y=ema9,
-        mode='lines', name='9 EMA (Fast Trend)',
-        line=dict(color='#ff7f0e', width=1.5, dash='dot')
-    ))
-    
-    # 21 EMA (Base Trend Line)
-    fig.add_trace(go.Scatter(
-        x=hist_df.index, y=ema21,
-        mode='lines', name='21 EMA (Base Trend)',
-        line=dict(color='#9467bd', width=1.5, dash='dash')
-    ))
-    
-    # Overlay Critical 0 DTE Parameters
-    if rec:
-        long_stk = rec['Long_Strike']
-        short_stk = rec['Short_Strike']
-        be_val = rec['BE']
-        
-        # Long Strike Level (Entry Barrier)
-        fig.add_hline(
-            y=long_stk, line_dash="dash", line_color="#2ca02c", line_width=2,
-            annotation_text=f"Long Strike (Floor): ${long_stk:.2f}",
-            annotation_position="top right", annotation_font_color="#2ca02c"
-        )
-        
-        # Short Strike Level (Max Profit Cap)
-        fig.add_hline(
-            y=short_stk, line_dash="dash", line_color="#d62728", line_width=2,
-            annotation_text=f"Short Strike (Cap): ${short_stk:.2f}",
-            annotation_position="top right", annotation_font_color="#d62728"
-        )
-        
-        # Breakeven Level
-        fig.add_hline(
-            y=be_val, line_dash="dot", line_color="#ffbb78", line_width=2,
-            annotation_text=f"Breakeven Level: ${be_val:.2f}",
-            annotation_position="bottom right", annotation_font_color="#d62728"
-        )
-        
-        # Shaded Target Profit Zone
-        fig.add_hrect(
-            y0=min(long_stk, short_stk), y1=max(long_stk, short_stk),
-            fillcolor="#2ca02c", opacity=0.12, line_width=0,
-            annotation_text="🎯 Max Profit Zone", annotation_position="top left"
-        )
-    
-    # Chart Layout (X/Y Axes, Formatting, Mobile Padding)
-    fig.update_layout(
-        xaxis=dict(
-            title="Time of Day (US/Eastern)",
-            showgrid=True,
-            gridcolor="#f0f2f6"
-        ),
-        yaxis=dict(
-            title="SPY Share Price ($ USD)",
-            showgrid=True,
-            gridcolor="#f0f2f6",
-            tickformat="$.2f"
-        ),
-        template="plotly_white",
-        height=480,
-        margin=dict(l=15, r=15, t=30, b=30),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
-        hovermode="x unified"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.warning("Awaiting live 5-minute market data from Yahoo Finance.")
-
-if auto_refresh:
-    time.sleep(60)
+if st.sidebar.button("🔄 Force Refresh"):
+    st.cache_data.clear()
     st.rerun()
 
+# Fetch & Process
+raw_df = fetch_spy_intraday_data()
+
+if raw_df.empty:
+    st.error(
+        "Unable to retrieve intraday market data. Verify connection to data feed."
+    )
+    st.stop()
+
+processed_df = generate_intraday_signals(
+    raw_df,
+    fast_ema=fast_ema,
+    slow_ema=slow_ema,
+    atr_period=atr_len,
+    rvol_window=rvol_win,
+)
+
+latest = processed_df.iloc[-1]
+current_time = latest.name.strftime("%Y-%m-%d %H:%M:%S ET")
+
+# Top KPI Metric Cards
+col1, col2, col3, col4, col5 = st.columns(5)
+col1.metric("SPY Last", f"${latest['close']:.2f}")
+col2.metric("Intraday VWAP", f"${latest['vwap']:.2f}")
+col3.metric("ATR (14)", f"${latest['atr']:.2f}")
+col4.metric(
+    "EMA Spread (Norm)",
+    f"{latest['ema_spread_norm']:.2f}σ",
+    delta=f"{(latest['ema_fast'] - latest['ema_slow']):.2f}",
+)
+col5.metric("RVOL", f"{latest['rvol']:.2f}x")
+
+st.markdown("---")
+
+# Signal Banner & Active Strategy Card
+sig_val = int(latest["signal"])
+spread_info = get_spread_recommendation(
+    latest["close"], sig_val, spread_width=spread_width
+)
+
+banner_col, details_col = st.columns([1.2, 2])
+
+with banner_col:
+    st.markdown("### 📡 Real-Time Indicator State")
+    if sig_val == 1:
+        st.markdown(
+            '<div class="signal-bull">🟢 CALL DEBIT SPREAD TRIGGERED</div>',
+            unsafe_allow_html=True,
+        )
+    elif sig_val == -1:
+        st.markdown(
+            '<div class="signal-bear">🔴 PUT DEBIT SPREAD TRIGGERED</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="signal-neutral">⚪ MONITORING (NO TRIGGER)</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Session gate verification
+    now_et = latest.name.time()
+    in_am = (
+        pd.to_datetime("09:50:00").time()
+        <= now_et
+        <= pd.to_datetime("11:30:00").time()
+    )
+    in_pm = (
+        pd.to_datetime("13:45:00").time()
+        <= now_et
+        <= pd.to_datetime("15:15:00").time()
+    )
+    session_status = "Active Window ✅" if (in_am or in_pm) else "Outside Filter ⏳"
+
+    st.write(f"**Session State:** {session_status}")
+    st.write(f"**As of:** `{current_time}`")
+
+with details_col:
+    st.markdown("### 📋 Suggested Structure")
+    if spread_info:
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.info(f"**Long Leg:**\n{spread_info['long_leg']}")
+        sc2.info(f"**Short Leg:**\n{spread_info['short_leg']}")
+        sc3.success(f"**Target:**\n{spread_info['target']}")
+    else:
+        st.write(
+            "Waiting for confirmation thresholds:\n"
+            "- EMA Spread Norm: `> 0.15` (Call) or `< -0.15` (Put)\n"
+            "- VWAP Distance Norm: `0.20 to 1.10` (Call) or `-0.20 to -1.10` (Put)\n"
+            "- Relative Volume: `>= 1.30x`"
+        )
+
+st.markdown("---")
+
+# Charting
+st.subheader("📊 Intraday Price Action & Multi-Factor Indicators")
+
+# Plot only current session
+today_date = latest.name.date()
+plot_df = processed_df[processed_df.index.date == today_date].copy()
+
+if plot_df.empty:
+    plot_df = processed_df.tail(78).copy()  # Fallback to last ~1 trading session
+
+fig = make_subplots(
+    rows=2,
+    cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.06,
+    row_heights=[0.7, 0.3],
+    subplot_titles=("SPY Candlesticks & Factor Overlays", "Relative Volume (RVOL)"),
+)
+
+# Row 1: Candlesticks + VWAP + EMAs
+fig.add_trace(
+    go.Candlestick(
+        x=plot_df.index,
+        open=plot_df["open"],
+        high=plot_df["high"],
+        low=plot_df["low"],
+        close=plot_df["close"],
+        name="Price",
+    ),
+    row=1,
+    col=1,
+)
+
+fig.add_trace(
+    go.Scatter(
+        x=plot_df.index,
+        y=plot_df["vwap"],
+        line=dict(color="#ffa726", width=1.5),
+        name="VWAP",
+    ),
+    row=1,
+    col=1,
+)
+
+fig.add_trace(
+    go.Scatter(
+        x=plot_df.index,
+        y=plot_df["ema_fast"],
+        line=dict(color="#29b6f6", width=1),
+        name=f"EMA {fast_ema}",
+    ),
+    row=1,
+    col=1,
+)
+
+fig.add_trace(
+    go.Scatter(
+        x=plot_df.index,
+        y=plot_df["ema_slow"],
+        line=dict(color="#ab47bc", width=1),
+        name=f"EMA {slow_ema}",
+    ),
+    row=1,
+    col=1,
+)
+
+# Markers for Entry Impulse Signals
+bull_entries = plot_df[plot_df["entry_signal"] == 1]
+bear_entries = plot_df[plot_df["entry_signal"] == -1]
+
+if not bull_entries.empty:
+    fig.add_trace(
+        go.Scatter(
+            x=bull_entries.index,
+            y=bull_entries["low"] - (bull_entries["atr"] * 0.5),
+            mode="markers",
+            marker=dict(symbol="triangle-up", size=11, color="#00e676"),
+            name="Bull Entry Signal",
+        ),
+        row=1,
+        col=1,
+    )
+
+if not bear_entries.empty:
+    fig.add_trace(
+        go.Scatter(
+            x=bear_entries.index,
+            y=bear_entries["high"] + (bear_entries["atr"] * 0.5),
+            mode="markers",
+            marker=dict(symbol="triangle-down", size=11, color="#ff5252"),
+            name="Bear Entry Signal",
+        ),
+        row=1,
+        col=1,
+    )
+
+# Row 2: RVOL
+fig.add_trace(
+    go.Bar(
+        x=plot_df.index,
+        y=plot_df["rvol"],
+        name="RVOL",
+        marker_color=np.where(plot_df["rvol"] >= 1.3, "#00e676", "#78909c"),
+    ),
+    row=2,
+    col=1,
+)
+
+fig.add_hline(y=1.3, line_dash="dot", line_color="#ffca28", row=2, col=1)
+
+fig.update_layout(
+    height=650,
+    margin=dict(l=20, r=20, t=30, b=20),
+    xaxis_rangeslider_visible=False,
+    template="plotly_dark",
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------------------------------------
+# Signal History Audit Table
+# ---------------------------------------------------------
+st.subheader("📜 Today's Signal Impulses")
+signal_log = plot_df[plot_df["entry_signal"] != 0][
+    [
+        "close",
+        "vwap",
+        "ema_spread_norm",
+        "vwap_dist_norm",
+        "rvol",
+        "entry_signal",
+    ]
+].copy()
+
+if not signal_log.empty:
+    signal_log["Trigger"] = signal_log["entry_signal"].apply(
+        lambda x: "🟢 CALL SPREAD" if x == 1 else "🔴 PUT SPREAD"
+    )
+    signal_log.drop(columns=["entry_signal"], inplace=True)
+    st.dataframe(
+        signal_log.sort_index(ascending=False).style.format(
+            {
+                "close": "${:.2f}",
+                "vwap": "${:.2f}",
+                "ema_spread_norm": "{:.2f}σ",
+                "vwap_dist_norm": "{:.2f}σ",
+                "rvol": "{:.2f}x",
+            }
+        ),
+        use_container_width=True,
+    )
+else:
+    st.info(
+        "No verified breakout entry impulses generated yet in today's active trading windows."
+    )
