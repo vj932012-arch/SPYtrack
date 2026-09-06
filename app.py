@@ -55,11 +55,7 @@ def generate_intraday_signals(
     atr_period: int = 14,
     rvol_window: int = 20,
 ) -> pd.DataFrame:
-    """Computes dynamic multi-factor entry thresholds for intraday directional debit spreads.
-
-    Expected columns in df: ['open', 'high', 'low', 'close', 'volume', 'vwap']
-    Index must be a DatetimeIndex in US/Eastern.
-    """
+    """Computes dynamic multi-factor entry thresholds for intraday directional debit spreads."""
     df = df.copy()
 
     # 1. EMAs and Normalized Delta
@@ -97,25 +93,25 @@ def generate_intraday_signals(
     # Signal Threshold Logic
     call_spread_trigger = (
         session_active
-        & (df["ema_spread_norm"] > 0.15)  # Fast EMA established above slow EMA
-        & (df["vwap_dist_norm"] >= 0.20)  # Price cleared VWAP support
-        & (df["vwap_dist_norm"] <= 1.10)  # Not overextended into upper bands
-        & (df["rvol"] >= 1.30)  # Volume expansion confirming breakout
-        & (df["close"] > df["open"])  # Bullish candle close
+        & (df["ema_spread_norm"] > 0.15)
+        & (df["vwap_dist_norm"] >= 0.20)
+        & (df["vwap_dist_norm"] <= 1.10)
+        & (df["rvol"] >= 1.30)
+        & (df["close"] > df["open"])
     )
 
     put_spread_trigger = (
         session_active
-        & (df["ema_spread_norm"] < -0.15)  # Fast EMA established below slow EMA
-        & (df["vwap_dist_norm"] <= -0.20)  # Price broken below VWAP
-        & (df["vwap_dist_norm"] >= -1.10)  # Not overextended into lower bands
-        & (df["rvol"] >= 1.30)  # Volume surge on distribution
-        & (df["close"] < df["open"])  # Bearish candle close
+        & (df["ema_spread_norm"] < -0.15)
+        & (df["vwap_dist_norm"] <= -0.20)
+        & (df["vwap_dist_norm"] >= -1.10)
+        & (df["rvol"] >= 1.30)
+        & (df["close"] < df["open"])
     )
 
     df["signal"] = 0
-    df.loc[call_spread_trigger, "signal"] = 1  # Long Call Debit Spread
-    df.loc[put_spread_trigger, "signal"] = -1  # Long Put Debit Spread
+    df.loc[call_spread_trigger, "signal"] = 1
+    df.loc[put_spread_trigger, "signal"] = -1
 
     # Filter out consecutive duplicate signals (take initial impulse only)
     df["entry_signal"] = np.where(
@@ -142,14 +138,14 @@ def fetch_spy_intraday_data():
     # Normalize column names
     df.columns = [c.lower() for c in df.columns]
 
-    # Localize index to US/Eastern
+    # Localize index to US/Eastern using IANA timezone "America/New_York"
     if df.index.tz is None:
         df.index = (
             df.index.tz_localize("UTC")
-            .tz_convert("US/Eastern")
+            .tz_convert("America/New_York")
         )
     else:
-        df.index = df.index.tz_convert("US/Eastern")
+        df.index = df.index.tz_convert("America/New_York")
 
     # Filter for standard market hours (9:30 AM to 4:00 PM ET)
     df = df.between_time("09:30", "16:00").copy()
