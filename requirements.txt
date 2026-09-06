@@ -1,6 +1,6 @@
 streamlit
 yfinance
 pandas
-requests
-pytz
+numpy
 plotly
+pytz
