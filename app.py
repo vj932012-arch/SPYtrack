@@ -1,6 +1,7 @@
 import datetime
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pytz
@@ -54,6 +55,8 @@ def generate_intraday_signals(
     slow_ema: int = 21,
     atr_period: int = 14,
     rvol_window: int = 20,
+    adx_period: int = 14,
+    adx_threshold: float = 25.0
 ) -> pd.DataFrame:
     """Computes dynamic multi-factor entry thresholds for intraday directional debit spreads."""
     df = df.copy()
@@ -79,7 +82,20 @@ def generate_intraday_signals(
     df["vol_ma"] = df["volume"].rolling(window=rvol_window).mean()
     df["rvol"] = df["volume"] / df["vol_ma"]
 
-    # 5. Session Phase Filtering
+    # 5. ADX and DMI Calculation
+    adx_df = ta.adx(df["high"], df["low"], df["close"], length=adx_period)
+    
+    adx_col = f"ADX_{adx_period}"
+    dmp_col = f"DMP_{adx_period}"
+    dmn_col = f"DMN_{adx_period}"
+    
+    if adx_df is not None:
+        df = pd.concat([df, adx_df], axis=1)
+    else:
+        # Fallback if calculation fails on limited data
+        df[adx_col], df[dmp_col], df[dmn_col] = 0.0, 0.0, 0.0
+
+    # 6. Session Phase Filtering
     time = df.index.time
     t_start_am = pd.to_datetime("09:50:00").time()
     t_end_am = pd.to_datetime("11:30:00").time()
@@ -90,7 +106,7 @@ def generate_intraday_signals(
         (time >= t_start_pm) & (time <= t_end_pm)
     )
 
-    # Signal Threshold Logic
+    # Signal Threshold Logic with ADX & DMI filters
     call_spread_trigger = (
         session_active
         & (df["ema_spread_norm"] > 0.15)
@@ -98,6 +114,8 @@ def generate_intraday_signals(
         & (df["vwap_dist_norm"] <= 1.10)
         & (df["rvol"] >= 1.30)
         & (df["close"] > df["open"])
+        & (df[adx_col] >= adx_threshold)
+        & (df[dmp_col] > df[dmn_col])
     )
 
     put_spread_trigger = (
@@ -107,6 +125,8 @@ def generate_intraday_signals(
         & (df["vwap_dist_norm"] >= -1.10)
         & (df["rvol"] >= 1.30)
         & (df["close"] < df["open"])
+        & (df[adx_col] >= adx_threshold)
+        & (df[dmn_col] > df[dmp_col])
     )
 
     df["signal"] = 0
@@ -135,7 +155,6 @@ def fetch_spy_intraday_data():
     if df.empty:
         return pd.DataFrame()
 
-    # Normalize column names
     df.columns = [c.lower() for c in df.columns]
 
     # Localize index to US/Eastern using IANA timezone "America/New_York"
@@ -153,12 +172,8 @@ def fetch_spy_intraday_data():
     # Anchor VWAP to each session date
     df["date"] = df.index.date
     typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
-    df["cum_vp"] = (
-        typical_price * df["volume"]
-    ).groupby(df["date"]).cumsum()
-    df["cum_vol"] = (
-        df["volume"]
-    ).groupby(df["date"]).cumsum()
+    df["cum_vp"] = (typical_price * df["volume"]).groupby(df["date"]).cumsum()
+    df["cum_vol"] = (df["volume"]).groupby(df["date"]).cumsum()
     df["vwap"] = df["cum_vp"] / df["cum_vol"]
     df.drop(columns=["date", "cum_vp", "cum_vol"], inplace=True)
 
@@ -197,7 +212,7 @@ def get_spread_recommendation(
 # ---------------------------------------------------------
 st.title("🎯 SPY Dynamic Intraday Spread Tracker")
 st.caption(
-    "Multi-factor signal scanner analyzing normalized EMA deltas, VWAP displacement, and RVOL expansion."
+    "Multi-factor signal scanner analyzing normalized EMA deltas, VWAP displacement, RVOL expansion, and ADX trend strength."
 )
 
 # Sidebar Parameters
@@ -206,6 +221,8 @@ fast_ema = st.sidebar.slider("Fast EMA", 5, 20, 9)
 slow_ema = st.sidebar.slider("Slow EMA", 15, 50, 21)
 atr_len = st.sidebar.slider("ATR Period", 7, 28, 14)
 rvol_win = st.sidebar.slider("RVOL Baseline Window", 10, 40, 20)
+adx_len = st.sidebar.slider("ADX Period", 7, 28, 14)
+adx_thresh = st.sidebar.slider("ADX Threshold", 15.0, 40.0, 25.0, step=1.0)
 spread_width = st.sidebar.selectbox("Spread Width ($)", [1.0, 2.0, 3.0, 5.0], index=1)
 
 if st.sidebar.button("🔄 Force Refresh"):
@@ -227,22 +244,29 @@ processed_df = generate_intraday_signals(
     slow_ema=slow_ema,
     atr_period=atr_len,
     rvol_window=rvol_win,
+    adx_period=adx_len,
+    adx_threshold=adx_thresh
 )
 
 latest = processed_df.iloc[-1]
 current_time = latest.name.strftime("%Y-%m-%d %H:%M:%S ET")
 
-# Top KPI Metric Cards
-col1, col2, col3, col4, col5 = st.columns(5)
+# Top KPI Metric Cards (Expanded to include ADX)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 col1.metric("SPY Last", f"${latest['close']:.2f}")
 col2.metric("Intraday VWAP", f"${latest['vwap']:.2f}")
 col3.metric("ATR (14)", f"${latest['atr']:.2f}")
 col4.metric(
-    "EMA Spread (Norm)",
+    "EMA Spread",
     f"{latest['ema_spread_norm']:.2f}σ",
     delta=f"{(latest['ema_fast'] - latest['ema_slow']):.2f}",
 )
 col5.metric("RVOL", f"{latest['rvol']:.2f}x")
+
+# Dynamic ADX Metric Color
+adx_val = latest.get(f"ADX_{adx_len}", 0)
+adx_color = "normal" if adx_val >= adx_thresh else "off"
+col6.metric("ADX (Strength)", f"{adx_val:.1f}")
 
 st.markdown("---")
 
@@ -300,8 +324,9 @@ with details_col:
         st.write(
             "Waiting for confirmation thresholds:\n"
             "- EMA Spread Norm: `> 0.15` (Call) or `< -0.15` (Put)\n"
-            "- VWAP Distance Norm: `0.20 to 1.10` (Call) or `-0.20 to -1.10` (Put)\n"
-            "- Relative Volume: `>= 1.30x`"
+            "- VWAP Distance: `0.20 to 1.10` (Call) or `-0.20 to -1.10` (Put)\n"
+            "- RVOL: `>= 1.30x`\n"
+            f"- ADX Trend Strength: `>= {adx_thresh}`"
         )
 
 st.markdown("---")
@@ -317,12 +342,12 @@ if plot_df.empty:
     plot_df = processed_df.tail(78).copy()  # Fallback to last ~1 trading session
 
 fig = make_subplots(
-    rows=2,
+    rows=3,
     cols=1,
     shared_xaxes=True,
-    vertical_spacing=0.06,
-    row_heights=[0.7, 0.3],
-    subplot_titles=("SPY Candlesticks & Factor Overlays", "Relative Volume (RVOL)"),
+    vertical_spacing=0.04,
+    row_heights=[0.5, 0.25, 0.25],
+    subplot_titles=("SPY Candlesticks & Factor Overlays", "Relative Volume (RVOL)", "ADX & DMI (Trend Strength)"),
 )
 
 # Row 1: Candlesticks + VWAP + EMAs
@@ -416,11 +441,61 @@ fig.add_trace(
 
 fig.add_hline(y=1.3, line_dash="dot", line_color="#ffca28", row=2, col=1)
 
+# Row 3: ADX & DMI
+adx_col = f"ADX_{adx_len}"
+dmp_col = f"DMP_{adx_len}"
+dmn_col = f"DMN_{adx_len}"
+
+if adx_col in plot_df.columns:
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df.index,
+            y=plot_df[adx_col],
+            line=dict(color="#FFD700", width=2),
+            name="ADX",
+        ),
+        row=3,
+        col=1,
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df.index,
+            y=plot_df[dmp_col],
+            line=dict(color="#00e676", width=1.2),
+            name="+DI",
+        ),
+        row=3,
+        col=1,
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df.index,
+            y=plot_df[dmn_col],
+            line=dict(color="#ff5252", width=1.2),
+            name="-DI",
+        ),
+        row=3,
+        col=1,
+    )
+
+    fig.add_hline(
+        y=adx_thresh, 
+        line_dash="dot", 
+        line_color="#b0bec5", 
+        row=3, 
+        col=1, 
+        annotation_text=f"Threshold ({adx_thresh})", 
+        annotation_position="bottom right"
+    )
+
 fig.update_layout(
-    height=650,
+    height=850,
     margin=dict(l=20, r=20, t=30, b=20),
     xaxis_rangeslider_visible=False,
     template="plotly_dark",
+    hovermode="x unified"
 )
 
 st.plotly_chart(fig, use_container_width=True)
@@ -429,32 +504,42 @@ st.plotly_chart(fig, use_container_width=True)
 # Signal History Audit Table
 # ---------------------------------------------------------
 st.subheader("📜 Today's Signal Impulses")
-signal_log = plot_df[plot_df["entry_signal"] != 0][
-    [
-        "close",
-        "vwap",
-        "ema_spread_norm",
-        "vwap_dist_norm",
-        "rvol",
-        "entry_signal",
-    ]
-].copy()
+audit_cols = [
+    "close", "vwap", "ema_spread_norm", "vwap_dist_norm", "rvol", "entry_signal"
+]
+if adx_col in plot_df.columns:
+    audit_cols.append(adx_col)
+
+signal_log = plot_df[plot_df["entry_signal"] != 0][audit_cols].copy()
 
 if not signal_log.empty:
     signal_log["Trigger"] = signal_log["entry_signal"].apply(
         lambda x: "🟢 CALL SPREAD" if x == 1 else "🔴 PUT SPREAD"
     )
     signal_log.drop(columns=["entry_signal"], inplace=True)
+    
+    # Rename ADX column for cleaner display
+    if adx_col in signal_log.columns:
+        signal_log.rename(columns={adx_col: "ADX"}, inplace=True)
+        format_dict = {
+            "close": "${:.2f}",
+            "vwap": "${:.2f}",
+            "ema_spread_norm": "{:.2f}σ",
+            "vwap_dist_norm": "{:.2f}σ",
+            "rvol": "{:.2f}x",
+            "ADX": "{:.1f}"
+        }
+    else:
+        format_dict = {
+            "close": "${:.2f}",
+            "vwap": "${:.2f}",
+            "ema_spread_norm": "{:.2f}σ",
+            "vwap_dist_norm": "{:.2f}σ",
+            "rvol": "{:.2f}x",
+        }
+
     st.dataframe(
-        signal_log.sort_index(ascending=False).style.format(
-            {
-                "close": "${:.2f}",
-                "vwap": "${:.2f}",
-                "ema_spread_norm": "{:.2f}σ",
-                "vwap_dist_norm": "{:.2f}σ",
-                "rvol": "{:.2f}x",
-            }
-        ),
+        signal_log.sort_index(ascending=False).style.format(format_dict),
         use_container_width=True,
     )
 else:
