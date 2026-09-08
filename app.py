@@ -12,7 +12,7 @@ import yfinance as yf
 # Page Configuration & Styling
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="SPY Intraday Spread Tracker", page_icon="📈", layout="wide"
+    page_title="Intraday Spread Tracker (SPY & QQQ)", page_icon="📈", layout="wide"
 )
 
 st.markdown(
@@ -25,20 +25,37 @@ st.markdown(
         background-color: rgba(255, 255, 255, 0.03);
         margin-bottom: 10px;
     }
-    .signal-bull {
+    
+    /* Top Banner Styles */
+    .banner-green {
+        background-color: rgba(0, 230, 118, 0.15);
+        border-left: 6px solid #00e676;
+        padding: 15px 20px;
+        border-radius: 6px;
         color: #00e676;
         font-weight: 700;
-        font-size: 1.25rem;
+        font-size: 1.2rem;
+        margin-bottom: 10px;
     }
-    .signal-bear {
+    .banner-red {
+        background-color: rgba(255, 82, 82, 0.15);
+        border-left: 6px solid #ff5252;
+        padding: 15px 20px;
+        border-radius: 6px;
         color: #ff5252;
         font-weight: 700;
-        font-size: 1.25rem;
+        font-size: 1.2rem;
+        margin-bottom: 10px;
     }
-    .signal-neutral {
-        color: #b0bec5;
-        font-weight: 600;
-        font-size: 1.25rem;
+    .banner-yellow {
+        background-color: rgba(255, 235, 59, 0.15);
+        border-left: 6px solid #ffeb3b;
+        padding: 15px 20px;
+        border-radius: 6px;
+        color: #ffeb3b;
+        font-weight: 700;
+        font-size: 1.2rem;
+        margin-bottom: 10px;
     }
     </style>
 """,
@@ -92,7 +109,6 @@ def generate_intraday_signals(
     if adx_df is not None:
         df = pd.concat([df, adx_df], axis=1)
     else:
-        # Fallback if calculation fails on limited data
         df[adx_col], df[dmp_col], df[dmn_col] = 0.0, 0.0, 0.0
 
     # 6. Session Phase Filtering
@@ -147,15 +163,15 @@ def generate_intraday_signals(
 # Market Data Fetcher & VWAP Assembler
 # ---------------------------------------------------------
 @st.cache_data(ttl=60)
-def fetch_spy_intraday_data():
-    """Fetches intraday 5-minute bars for SPY and computes cumulative day-anchored VWAP."""
-    ticker = yf.Ticker("SPY")
+def fetch_intraday_data(ticker_symbol: str):
+    """Fetches intraday 5-minute bars and computes cumulative day-anchored VWAP."""
+    ticker = yf.Ticker(ticker_symbol)
     df = ticker.history(period="5d", interval="5m")
 
     if df.empty:
         return pd.DataFrame()
 
-    # FIX: Flatten multi-index columns if present (yfinance quirk)
+    # Flatten multi-index columns if present (yfinance quirk)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
@@ -186,39 +202,170 @@ def fetch_spy_intraday_data():
 
 
 def get_spread_recommendation(
-    current_price: float, signal: int, spread_width: float = 2.0
+    ticker: str, current_price: float, signal: int, spread_width: float = 2.0
 ):
     """Calculates strike selections for vertical debit spreads."""
     if signal == 1:
         long_strike = np.floor(current_price)
         short_strike = long_strike + spread_width
         return {
-            "type": "CALL DEBIT SPREAD (Bullish)",
+            "type": f"{ticker} CALL DEBIT SPREAD (Bullish)",
             "long_leg": f"Buy ${long_strike:.0f} Call",
             "short_leg": f"Sell ${short_strike:.0f} Call",
-            "target": f"SPY > ${short_strike:.2f} by EOD",
+            "target": f"{ticker} > ${short_strike:.2f} by EOD",
             "risk_profile": "Defined Risk (Net Debit Paid)",
         }
     elif signal == -1:
         long_strike = np.ceil(current_price)
         short_strike = long_strike - spread_width
         return {
-            "type": "PUT DEBIT SPREAD (Bearish)",
+            "type": f"{ticker} PUT DEBIT SPREAD (Bearish)",
             "long_leg": f"Buy ${long_strike:.0f} Put",
             "short_leg": f"Sell ${short_strike:.0f} Put",
-            "target": f"SPY < ${short_strike:.2f} by EOD",
+            "target": f"{ticker} < ${short_strike:.2f} by EOD",
             "risk_profile": "Defined Risk (Net Debit Paid)",
         }
     return None
+
+def render_banner(ticker: str, sig_val: int, price: float):
+    """Renders the top HTML banner based on the signal state."""
+    if sig_val == 1:
+        return f'<div class="banner-green">🟢 {ticker} @ ${price:.2f} — CALL DEBIT SPREAD TRIGGERED</div>'
+    elif sig_val == -1:
+        return f'<div class="banner-red">🔴 {ticker} @ ${price:.2f} — PUT DEBIT SPREAD TRIGGERED</div>'
+    else:
+        return f'<div class="banner-yellow">🟡 {ticker} @ ${price:.2f} — MONITORING (NO TRIGGER)</div>'
+
+
+# ---------------------------------------------------------
+# Dynamic Dashboard Renderer
+# ---------------------------------------------------------
+def render_ticker_dashboard(ticker: str, processed_df: pd.DataFrame, adx_len: int, adx_thresh: float, spread_width: float):
+    """Renders the metrics, tables, and charts for a specific ticker."""
+    latest = processed_df.iloc[-1]
+    
+    # Top KPI Metric Cards
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1.metric("Last Price", f"${latest['close']:.2f}")
+    col2.metric("VWAP", f"${latest['vwap']:.2f}")
+    col3.metric("ATR", f"${latest['atr']:.2f}")
+    col4.metric(
+        "EMA Spread",
+        f"{latest['ema_spread_norm']:.2f}σ",
+        delta=f"{(latest['ema_fast'] - latest['ema_slow']):.2f}",
+    )
+    col5.metric("RVOL", f"{latest['rvol']:.2f}x")
+
+    adx_val = latest.get(f"ADX_{adx_len}", 0)
+    col6.metric("ADX (Strength)", f"{adx_val:.1f}")
+
+    st.markdown("---")
+
+    # Signal & Active Strategy Card
+    sig_val = int(latest["signal"])
+    spread_info = get_spread_recommendation(
+        ticker, latest["close"], sig_val, spread_width=spread_width
+    )
+    
+    st.markdown(f"### 📋 {ticker} Suggested Structure")
+    if spread_info:
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.info(f"**Long Leg:**\n{spread_info['long_leg']}")
+        sc2.info(f"**Short Leg:**\n{spread_info['short_leg']}")
+        sc3.success(f"**Target:**\n{spread_info['target']}")
+    else:
+        st.write(
+            f"Waiting for **{ticker}** confirmation thresholds:\n"
+            "- EMA Spread Norm: `> 0.15` (Call) or `< -0.15` (Put)\n"
+            "- VWAP Distance: `0.20 to 1.10` (Call) or `-0.20 to -1.10` (Put)\n"
+            "- RVOL: `>= 1.30x`\n"
+            f"- ADX Trend Strength: `>= {adx_thresh}`"
+        )
+
+    st.markdown("---")
+
+    # Charting
+    st.subheader(f"📊 {ticker} Intraday Price Action & Indicators")
+
+    today_date = latest.name.date()
+    plot_df = processed_df[processed_df.index.date == today_date].copy()
+
+    if plot_df.empty:
+        plot_df = processed_df.tail(78).copy() 
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.5, 0.25, 0.25],
+        subplot_titles=(f"{ticker} Candlesticks", "Relative Volume (RVOL)", "ADX & DMI"),
+    )
+
+    # Row 1: Candlesticks
+    fig.add_trace(
+        go.Candlestick(
+            x=plot_df.index,
+            open=plot_df["open"], high=plot_df["high"],
+            low=plot_df["low"], close=plot_df["close"],
+            name="Price",
+        ), row=1, col=1
+    )
+    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["vwap"], line=dict(color="#ffa726", width=1.5), name="VWAP"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["ema_fast"], line=dict(color="#29b6f6", width=1), name="Fast EMA"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["ema_slow"], line=dict(color="#ab47bc", width=1), name="Slow EMA"), row=1, col=1)
+
+    bull_entries = plot_df[plot_df["entry_signal"] == 1]
+    bear_entries = plot_df[plot_df["entry_signal"] == -1]
+
+    if not bull_entries.empty:
+        fig.add_trace(go.Scatter(x=bull_entries.index, y=bull_entries["low"] - (bull_entries["atr"] * 0.5), mode="markers", marker=dict(symbol="triangle-up", size=11, color="#00e676"), name="Bull Signal"), row=1, col=1)
+    if not bear_entries.empty:
+        fig.add_trace(go.Scatter(x=bear_entries.index, y=bear_entries["high"] + (bear_entries["atr"] * 0.5), mode="markers", marker=dict(symbol="triangle-down", size=11, color="#ff5252"), name="Bear Signal"), row=1, col=1)
+
+    # Row 2: RVOL
+    fig.add_trace(go.Bar(x=plot_df.index, y=plot_df["rvol"], name="RVOL", marker_color=np.where(plot_df["rvol"] >= 1.3, "#00e676", "#78909c")), row=2, col=1)
+    fig.add_hline(y=1.3, line_dash="dot", line_color="#ffca28", row=2, col=1)
+
+    # Row 3: ADX & DMI
+    adx_col = f"ADX_{adx_len}"
+    dmp_col = f"DMP_{adx_len}"
+    dmn_col = f"DMN_{adx_len}"
+
+    if adx_col in plot_df.columns:
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[adx_col], line=dict(color="#FFD700", width=2), name="ADX"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[dmp_col], line=dict(color="#00e676", width=1.2), name="+DI"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[dmn_col], line=dict(color="#ff5252", width=1.2), name="-DI"), row=3, col=1)
+        fig.add_hline(y=adx_thresh, line_dash="dot", line_color="#b0bec5", row=3, col=1, annotation_text=f"Threshold ({adx_thresh})", annotation_position="bottom right")
+
+    fig.update_layout(height=850, margin=dict(l=20, r=20, t=30, b=20), xaxis_rangeslider_visible=False, template="plotly_dark", hovermode="x unified")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Signal History
+    st.subheader(f"📜 {ticker} Today's Signal Impulses")
+    audit_cols = ["close", "vwap", "ema_spread_norm", "vwap_dist_norm", "rvol", "entry_signal"]
+    if adx_col in plot_df.columns: audit_cols.append(adx_col)
+
+    signal_log = plot_df[plot_df["entry_signal"] != 0][audit_cols].copy()
+
+    if not signal_log.empty:
+        signal_log["Trigger"] = signal_log["entry_signal"].apply(lambda x: "🟢 CALL SPREAD" if x == 1 else "🔴 PUT SPREAD")
+        signal_log.drop(columns=["entry_signal"], inplace=True)
+        if adx_col in signal_log.columns:
+            signal_log.rename(columns={adx_col: "ADX"}, inplace=True)
+            fmt = {"close": "${:.2f}", "vwap": "${:.2f}", "ema_spread_norm": "{:.2f}σ", "vwap_dist_norm": "{:.2f}σ", "rvol": "{:.2f}x", "ADX": "{:.1f}"}
+        else:
+            fmt = {"close": "${:.2f}", "vwap": "${:.2f}", "ema_spread_norm": "{:.2f}σ", "vwap_dist_norm": "{:.2f}σ", "rvol": "{:.2f}x"}
+        st.dataframe(signal_log.sort_index(ascending=False).style.format(fmt), use_container_width=True)
+    else:
+        st.info(f"No verified breakout impulses generated for {ticker} yet in today's active trading windows.")
 
 
 # ---------------------------------------------------------
 # Main UI App
 # ---------------------------------------------------------
-st.title("🎯 SPY Dynamic Intraday Spread Tracker")
-st.caption(
-    "Multi-factor signal scanner analyzing normalized EMA deltas, VWAP displacement, RVOL expansion, and ADX trend strength."
-)
+st.title("🎯 SPY & QQQ Intraday Spread Tracker")
+st.caption("Multi-factor signal scanner analyzing normalized EMA deltas, VWAP displacement, RVOL expansion, and ADX trend strength.")
 
 # Sidebar Parameters
 st.sidebar.header("⚙️ Strategy Parameters")
@@ -234,320 +381,49 @@ if st.sidebar.button("🔄 Force Refresh"):
     st.cache_data.clear()
     st.rerun()
 
-# Fetch & Process
-raw_df = fetch_spy_intraday_data()
+# Fetch & Process both Tickers
+raw_spy = fetch_intraday_data("SPY")
+raw_qqq = fetch_intraday_data("QQQ")
 
-if raw_df.empty:
-    st.error(
-        "Unable to retrieve intraday market data. Verify connection to data feed."
-    )
+if raw_spy.empty or raw_qqq.empty:
+    st.error("Unable to retrieve intraday market data. Verify connection to data feed.")
     st.stop()
 
-processed_df = generate_intraday_signals(
-    raw_df,
-    fast_ema=fast_ema,
-    slow_ema=slow_ema,
-    atr_period=atr_len,
-    rvol_window=rvol_win,
-    adx_period=adx_len,
-    adx_threshold=adx_thresh
-)
+proc_spy = generate_intraday_signals(raw_spy, fast_ema, slow_ema, atr_len, rvol_win, adx_len, adx_thresh)
+proc_qqq = generate_intraday_signals(raw_qqq, fast_ema, slow_ema, atr_len, rvol_win, adx_len, adx_thresh)
 
-latest = processed_df.iloc[-1]
-current_time = latest.name.strftime("%Y-%m-%d %H:%M:%S ET")
+latest_spy = proc_spy.iloc[-1]
+latest_qqq = proc_qqq.iloc[-1]
 
-# Top KPI Metric Cards (Expanded to include ADX)
-col1, col2, col3, col4, col5, col6 = st.columns(6)
-col1.metric("SPY Last", f"${latest['close']:.2f}")
-col2.metric("Intraday VWAP", f"${latest['vwap']:.2f}")
-col3.metric("ATR (14)", f"${latest['atr']:.2f}")
-col4.metric(
-    "EMA Spread",
-    f"{latest['ema_spread_norm']:.2f}σ",
-    delta=f"{(latest['ema_fast'] - latest['ema_slow']):.2f}",
-)
-col5.metric("RVOL", f"{latest['rvol']:.2f}x")
+# ---------------------------------------------------------
+# Dynamic Signal Banners (Anchored to Top)
+# ---------------------------------------------------------
+st.markdown("### 🚨 Live Signal Status")
+current_time = latest_spy.name.strftime("%Y-%m-%d %H:%M:%S ET")
 
-# Dynamic ADX Metric Color
-adx_val = latest.get(f"ADX_{adx_len}", 0)
-adx_color = "normal" if adx_val >= adx_thresh else "off"
-col6.metric("ADX (Strength)", f"{adx_val:.1f}")
+# Session verification
+now_et = latest_spy.name.time()
+in_am = (pd.to_datetime("09:50:00").time() <= now_et <= pd.to_datetime("11:30:00").time())
+in_pm = (pd.to_datetime("13:45:00").time() <= now_et <= pd.to_datetime("15:15:00").time())
+session_status = "Active Window ✅" if (in_am or in_pm) else "Outside Trading Filter ⏳"
+st.write(f"**Session State:** {session_status} | **As of:** `{current_time}`")
+
+col_banner1, col_banner2 = st.columns(2)
+
+with col_banner1:
+    st.markdown(render_banner("SPY", int(latest_spy["signal"]), latest_spy["close"]), unsafe_allow_html=True)
+with col_banner2:
+    st.markdown(render_banner("QQQ", int(latest_qqq["signal"]), latest_qqq["close"]), unsafe_allow_html=True)
 
 st.markdown("---")
 
-# Signal Banner & Active Strategy Card
-sig_val = int(latest["signal"])
-spread_info = get_spread_recommendation(
-    latest["close"], sig_val, spread_width=spread_width
-)
-
-banner_col, details_col = st.columns([1.2, 2])
-
-with banner_col:
-    st.markdown("### 📡 Real-Time Indicator State")
-    if sig_val == 1:
-        st.markdown(
-            '<div class="signal-bull">🟢 CALL DEBIT SPREAD TRIGGERED</div>',
-            unsafe_allow_html=True,
-        )
-    elif sig_val == -1:
-        st.markdown(
-            '<div class="signal-bear">🔴 PUT DEBIT SPREAD TRIGGERED</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div class="signal-neutral">⚪ MONITORING (NO TRIGGER)</div>',
-            unsafe_allow_html=True,
-        )
-
-    # Session gate verification
-    now_et = latest.name.time()
-    in_am = (
-        pd.to_datetime("09:50:00").time()
-        <= now_et
-        <= pd.to_datetime("11:30:00").time()
-    )
-    in_pm = (
-        pd.to_datetime("13:45:00").time()
-        <= now_et
-        <= pd.to_datetime("15:15:00").time()
-    )
-    session_status = "Active Window ✅" if (in_am or in_pm) else "Outside Filter ⏳"
-
-    st.write(f"**Session State:** {session_status}")
-    st.write(f"**As of:** `{current_time}`")
-
-with details_col:
-    st.markdown("### 📋 Suggested Structure")
-    if spread_info:
-        sc1, sc2, sc3 = st.columns(3)
-        sc1.info(f"**Long Leg:**\n{spread_info['long_leg']}")
-        sc2.info(f"**Short Leg:**\n{spread_info['short_leg']}")
-        sc3.success(f"**Target:**\n{spread_info['target']}")
-    else:
-        st.write(
-            "Waiting for confirmation thresholds:\n"
-            "- EMA Spread Norm: `> 0.15` (Call) or `< -0.15` (Put)\n"
-            "- VWAP Distance: `0.20 to 1.10` (Call) or `-0.20 to -1.10` (Put)\n"
-            "- RVOL: `>= 1.30x`\n"
-            f"- ADX Trend Strength: `>= {adx_thresh}`"
-        )
-
-st.markdown("---")
-
-# Charting
-st.subheader("📊 Intraday Price Action & Multi-Factor Indicators")
-
-# Plot only current session
-today_date = latest.name.date()
-plot_df = processed_df[processed_df.index.date == today_date].copy()
-
-if plot_df.empty:
-    plot_df = processed_df.tail(78).copy()  # Fallback to last ~1 trading session
-
-fig = make_subplots(
-    rows=3,
-    cols=1,
-    shared_xaxes=True,
-    vertical_spacing=0.04,
-    row_heights=[0.5, 0.25, 0.25],
-    subplot_titles=("SPY Candlesticks & Factor Overlays", "Relative Volume (RVOL)", "ADX & DMI (Trend Strength)"),
-)
-
-# Row 1: Candlesticks + VWAP + EMAs
-fig.add_trace(
-    go.Candlestick(
-        x=plot_df.index,
-        open=plot_df["open"],
-        high=plot_df["high"],
-        low=plot_df["low"],
-        close=plot_df["close"],
-        name="Price",
-    ),
-    row=1,
-    col=1,
-)
-
-fig.add_trace(
-    go.Scatter(
-        x=plot_df.index,
-        y=plot_df["vwap"],
-        line=dict(color="#ffa726", width=1.5),
-        name="VWAP",
-    ),
-    row=1,
-    col=1,
-)
-
-fig.add_trace(
-    go.Scatter(
-        x=plot_df.index,
-        y=plot_df["ema_fast"],
-        line=dict(color="#29b6f6", width=1),
-        name=f"EMA {fast_ema}",
-    ),
-    row=1,
-    col=1,
-)
-
-fig.add_trace(
-    go.Scatter(
-        x=plot_df.index,
-        y=plot_df["ema_slow"],
-        line=dict(color="#ab47bc", width=1),
-        name=f"EMA {slow_ema}",
-    ),
-    row=1,
-    col=1,
-)
-
-# Markers for Entry Impulse Signals
-bull_entries = plot_df[plot_df["entry_signal"] == 1]
-bear_entries = plot_df[plot_df["entry_signal"] == -1]
-
-if not bull_entries.empty:
-    fig.add_trace(
-        go.Scatter(
-            x=bull_entries.index,
-            y=bull_entries["low"] - (bull_entries["atr"] * 0.5),
-            mode="markers",
-            marker=dict(symbol="triangle-up", size=11, color="#00e676"),
-            name="Bull Entry Signal",
-        ),
-        row=1,
-        col=1,
-    )
-
-if not bear_entries.empty:
-    fig.add_trace(
-        go.Scatter(
-            x=bear_entries.index,
-            y=bear_entries["high"] + (bear_entries["atr"] * 0.5),
-            mode="markers",
-            marker=dict(symbol="triangle-down", size=11, color="#ff5252"),
-            name="Bear Entry Signal",
-        ),
-        row=1,
-        col=1,
-    )
-
-# Row 2: RVOL
-fig.add_trace(
-    go.Bar(
-        x=plot_df.index,
-        y=plot_df["rvol"],
-        name="RVOL",
-        marker_color=np.where(plot_df["rvol"] >= 1.3, "#00e676", "#78909c"),
-    ),
-    row=2,
-    col=1,
-)
-
-fig.add_hline(y=1.3, line_dash="dot", line_color="#ffca28", row=2, col=1)
-
-# Row 3: ADX & DMI
-adx_col = f"ADX_{adx_len}"
-dmp_col = f"DMP_{adx_len}"
-dmn_col = f"DMN_{adx_len}"
-
-if adx_col in plot_df.columns:
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df.index,
-            y=plot_df[adx_col],
-            line=dict(color="#FFD700", width=2),
-            name="ADX",
-        ),
-        row=3,
-        col=1,
-    )
-    
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df.index,
-            y=plot_df[dmp_col],
-            line=dict(color="#00e676", width=1.2),
-            name="+DI",
-        ),
-        row=3,
-        col=1,
-    )
-    
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df.index,
-            y=plot_df[dmn_col],
-            line=dict(color="#ff5252", width=1.2),
-            name="-DI",
-        ),
-        row=3,
-        col=1,
-    )
-
-    fig.add_hline(
-        y=adx_thresh, 
-        line_dash="dot", 
-        line_color="#b0bec5", 
-        row=3, 
-        col=1, 
-        annotation_text=f"Threshold ({adx_thresh})", 
-        annotation_position="bottom right"
-    )
-
-fig.update_layout(
-    height=850,
-    margin=dict(l=20, r=20, t=30, b=20),
-    xaxis_rangeslider_visible=False,
-    template="plotly_dark",
-    hovermode="x unified"
-)
-
-st.plotly_chart(fig, use_container_width=True)
-
 # ---------------------------------------------------------
-# Signal History Audit Table
+# Tabbed Dashboards
 # ---------------------------------------------------------
-st.subheader("📜 Today's Signal Impulses")
-audit_cols = [
-    "close", "vwap", "ema_spread_norm", "vwap_dist_norm", "rvol", "entry_signal"
-]
-if adx_col in plot_df.columns:
-    audit_cols.append(adx_col)
+tab_spy, tab_qqq = st.tabs(["🇺🇸 SPY Dashboard", "💻 QQQ Dashboard"])
 
-signal_log = plot_df[plot_df["entry_signal"] != 0][audit_cols].copy()
+with tab_spy:
+    render_ticker_dashboard("SPY", proc_spy, adx_len, adx_thresh, spread_width)
 
-if not signal_log.empty:
-    signal_log["Trigger"] = signal_log["entry_signal"].apply(
-        lambda x: "🟢 CALL SPREAD" if x == 1 else "🔴 PUT SPREAD"
-    )
-    signal_log.drop(columns=["entry_signal"], inplace=True)
-    
-    # Rename ADX column for cleaner display
-    if adx_col in signal_log.columns:
-        signal_log.rename(columns={adx_col: "ADX"}, inplace=True)
-        format_dict = {
-            "close": "${:.2f}",
-            "vwap": "${:.2f}",
-            "ema_spread_norm": "{:.2f}σ",
-            "vwap_dist_norm": "{:.2f}σ",
-            "rvol": "{:.2f}x",
-            "ADX": "{:.1f}"
-        }
-    else:
-        format_dict = {
-            "close": "${:.2f}",
-            "vwap": "${:.2f}",
-            "ema_spread_norm": "{:.2f}σ",
-            "vwap_dist_norm": "{:.2f}σ",
-            "rvol": "{:.2f}x",
-        }
-
-    st.dataframe(
-        signal_log.sort_index(ascending=False).style.format(format_dict),
-        use_container_width=True,
-    )
-else:
-    st.info(
-        "No verified breakout entry impulses generated yet in today's active trading windows."
-    )
+with tab_qqq:
+    render_ticker_dashboard("QQQ", proc_qqq, adx_len, adx_thresh, spread_width)
