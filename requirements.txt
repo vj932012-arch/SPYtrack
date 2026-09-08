@@ -5,3 +5,4 @@ numpy
 plotly
 pytz
 tzdata
+pandas-ta
