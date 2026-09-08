@@ -338,8 +338,26 @@ def render_ticker_dashboard(ticker: str, processed_df: pd.DataFrame, adx_len: in
         fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[dmn_col], line=dict(color="#ff5252", width=1.2), name="-DI"), row=3, col=1)
         fig.add_hline(y=adx_thresh, line_dash="dot", line_color="#b0bec5", row=3, col=1, annotation_text=f"Threshold ({adx_thresh})", annotation_position="bottom right")
 
-    fig.update_layout(height=850, margin=dict(l=20, r=20, t=30, b=20), xaxis_rangeslider_visible=False, template="plotly_dark", hovermode="x unified")
-    st.plotly_chart(fig, use_container_width=True)
+    # Mobile Layout Optimizations applied here
+    fig.update_layout(
+        height=750, # Slightly reduced from 850px to ensure user can scroll the page itself on mobile
+        margin=dict(l=10, r=10, t=30, b=10), # Tighter margins for mobile screens
+        xaxis_rangeslider_visible=False, 
+        template="plotly_dark", 
+        hovermode="x unified",
+        dragmode="pan" # CRITICAL FIX: Maps 1-finger swipe to panning instead of zoom-box drawing
+    )
+    
+    # st.plotly_chart config dictionary explicitly passes touch-friendly controls
+    st.plotly_chart(
+        fig, 
+        use_container_width=True,
+        config={
+            'displayModeBar': False, # Hides the clunky top-right menu bar on mobile
+            'scrollZoom': True,      # Enables natural 2-finger pinch-to-zoom
+            'doubleClick': 'reset'   # Double-tap resets the view
+        }
+    )
 
     # Signal History
     st.subheader(f"📜 {ticker} Today's Signal Impulses")
