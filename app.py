@@ -155,6 +155,11 @@ def fetch_spy_intraday_data():
     if df.empty:
         return pd.DataFrame()
 
+    # FIX: Flatten multi-index columns if present (yfinance quirk)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    # Normalize column names
     df.columns = [c.lower() for c in df.columns]
 
     # Localize index to US/Eastern using IANA timezone "America/New_York"
