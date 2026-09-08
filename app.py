@@ -338,31 +338,28 @@ def render_ticker_dashboard(ticker: str, processed_df: pd.DataFrame, adx_len: in
         fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[dmn_col], line=dict(color="#ff5252", width=1.2), name="-DI"), row=3, col=1)
         fig.add_hline(y=adx_thresh, line_dash="dot", line_color="#b0bec5", row=3, col=1, annotation_text=f"Threshold ({adx_thresh})", annotation_position="bottom right")
 
-    # Mobile Layout Optimizations applied here
+    # Layout Optimizations applied here
     fig.update_layout(
         height=750, 
         margin=dict(l=10, r=10, t=30, b=10), 
-        xaxis_rangeslider_visible=False, 
         template="plotly_dark", 
         hovermode="x unified",
-        dragmode="pan", 
-        # Move legend to the top/bottom so it doesn't crush the chart horizontally on phones
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1) 
     )
     
-    # CRITICAL PINCH-TO-ZOOM FIX: 
-    # Force axes to unlock. Plotly often secretly locks them (fixedrange=True) on mobile when rangesliders are removed.
-    fig.update_xaxes(fixedrange=False)
+    # CRITICAL PINCH-TO-ZOOM FIXES:
+    # 1. By leaving out `dragmode="pan"`, we allow Plotly to fall back to its native mobile gesture handling (1 finger pan, 2 finger zoom).
+    # 2. We disable the rangeslider at the specific X-axis level rather than globally, preventing Plotly from secretly locking the axes (fixedrange=True).
+    fig.update_xaxes(rangeslider=dict(visible=False), fixedrange=False)
     fig.update_yaxes(fixedrange=False)
 
-    # st.plotly_chart config dictionary explicitly passes touch-friendly controls
+    # Passing clean config without scrollZoom overriding the touch sensors
     st.plotly_chart(
         fig, 
         use_container_width=True,
         config={
-            'displayModeBar': False, # Hides the clunky top-right menu bar on mobile
-            'scrollZoom': True,      
-            'doubleClick': 'reset'   # Double-tap resets the view
+            'displayModeBar': False, 
+            'doubleClick': 'reset'   
         }
     )
 
