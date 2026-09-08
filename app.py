@@ -1,7 +1,7 @@
 import datetime
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+import pandas-ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pytz
