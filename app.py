@@ -340,21 +340,28 @@ def render_ticker_dashboard(ticker: str, processed_df: pd.DataFrame, adx_len: in
 
     # Mobile Layout Optimizations applied here
     fig.update_layout(
-        height=750, # Slightly reduced from 850px to ensure user can scroll the page itself on mobile
-        margin=dict(l=10, r=10, t=30, b=10), # Tighter margins for mobile screens
+        height=750, 
+        margin=dict(l=10, r=10, t=30, b=10), 
         xaxis_rangeslider_visible=False, 
         template="plotly_dark", 
         hovermode="x unified",
-        dragmode="pan" # CRITICAL FIX: Maps 1-finger swipe to panning instead of zoom-box drawing
+        dragmode="pan", 
+        # Move legend to the top/bottom so it doesn't crush the chart horizontally on phones
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1) 
     )
     
+    # CRITICAL PINCH-TO-ZOOM FIX: 
+    # Force axes to unlock. Plotly often secretly locks them (fixedrange=True) on mobile when rangesliders are removed.
+    fig.update_xaxes(fixedrange=False)
+    fig.update_yaxes(fixedrange=False)
+
     # st.plotly_chart config dictionary explicitly passes touch-friendly controls
     st.plotly_chart(
         fig, 
         use_container_width=True,
         config={
             'displayModeBar': False, # Hides the clunky top-right menu bar on mobile
-            'scrollZoom': True,      # Enables natural 2-finger pinch-to-zoom
+            'scrollZoom': True,      
             'doubleClick': 'reset'   # Double-tap resets the view
         }
     )
